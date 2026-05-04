@@ -1,3 +1,4 @@
+cat > /opt/n8n-ai/gemini_agent.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -24,46 +25,87 @@ if [ -n "${GEMINI_MODEL:-}" ]; then
   MODEL_ARGS=(--model "$GEMINI_MODEL")
 fi
 
-RAW_OUTPUT="$(gemini -p "$PROMPT" --output-format json "${MODEL_ARGS[@]}" 2>&1)" || {
-  printf '%s' "$RAW_OUTPUT" | python3 -c '
+ERR_FILE="$(mktemp)"
+
+if ! RAW_OUTPUT="$(gemini -p "$PROMPT" --output-format json "${MODEL_ARGS[@]}" 2>"$ERR_FILE")"; then
+  ERR_CONTENT="$(cat "$ERR_FILE" || true)"
+  rm -f "$ERR_FILE"
+
+  printf '%s' "$ERR_CONTENT" | python3 -c '
 import sys, json
 err = sys.stdin.read()
 print(json.dumps({
   "fallback_required": True,
   "error": "gemini_cli_failed",
-  "stderr": err[-2000:]
+  "stderr": err[-3000:]
 }, ensure_ascii=False))
 '
   exit 0
-}
+fi
+
+rm -f "$ERR_FILE"
 
 printf '%s' "$RAW_OUTPUT" | python3 -c '
 import sys, json, re
 
-raw = sys.stdin.read()
+raw = sys.stdin.read().strip()
+
+def extract_json_object(text):
+    text = text.strip()
+
+    # Caso venha algum aviso antes/depois do JSON externo
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("no_json_object_found")
+
+    return text[start:end+1]
 
 try:
-    wrapper = json.loads(raw)
-    response = wrapper.get("response", "")
+    clean_raw = extract_json_object(raw)
+    wrapper = json.loads(clean_raw)
 except Exception:
     print(json.dumps({
         "fallback_required": True,
         "error": "invalid_gemini_wrapper",
-        "raw": raw[-2000:]
+        "raw": raw[-3000:]
+    }, ensure_ascii=False))
+    sys.exit(0)
+
+response = wrapper.get("response", "")
+
+# Algumas versões podem devolver response como objeto, não string
+if isinstance(response, dict):
+    print(json.dumps(response, ensure_ascii=False))
+    sys.exit(0)
+
+if not isinstance(response, str):
+    print(json.dumps({
+        "fallback_required": True,
+        "error": "empty_or_invalid_response",
+        "wrapper": wrapper
     }, ensure_ascii=False))
     sys.exit(0)
 
 response = response.strip()
+
+# Remove markdown fences, caso o modelo responda com ```json
 response = re.sub(r"^```(?:json)?", "", response).strip()
 response = re.sub(r"```$", "", response).strip()
 
+# Caso venha texto antes/depois do JSON de resposta
 try:
-    parsed = json.loads(response)
+    inner = extract_json_object(response)
+    parsed = json.loads(inner)
     print(json.dumps(parsed, ensure_ascii=False))
 except Exception:
     print(json.dumps({
         "fallback_required": True,
         "error": "invalid_json_response",
-        "raw_response": response[-2000:]
+        "raw_response": response[-3000:]
     }, ensure_ascii=False))
 '
+EOF
+
+chmod +x /opt/n8n-ai/gemini_agent.sh
