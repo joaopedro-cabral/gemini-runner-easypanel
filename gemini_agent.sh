@@ -1,6 +1,9 @@
 cat > /opt/n8n-ai/gemini_agent.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+export GEMINI_CLI_TRUST_WORKSPACE=true
+export HOME=/home/gemini
+cd /home/gemin
 
 TASK="${1:-generic}"
 PAYLOAD="$(cat)"
